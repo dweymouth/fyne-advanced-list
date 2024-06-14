@@ -148,7 +148,7 @@ func (l *List) ItemForID(id ListItemID) fyne.CanvasObject {
 	item, ok := lo.searchVisible(lo.visible, id)
 	lo.renderLock.RUnlock()
 	if ok {
-		return item
+		return item.child
 	}
 	return nil
 }
