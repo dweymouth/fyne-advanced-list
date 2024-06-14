@@ -138,6 +138,21 @@ func (l *List) RefreshItem(id ListItemID) {
 	}
 }
 
+// Returns the item that is currently bound to the given ID,
+// or none of the ID is currently out of the visible range of the list.
+//
+// Since: Not a core Fyne list API
+func (l *List) ItemForID(id ListItemID) fyne.CanvasObject {
+	lo := l.scroller.Content.(*fyne.Container).Layout.(*listLayout)
+	lo.renderLock.RLock() // ensures we are not changing visible info in render code during the search
+	item, ok := lo.searchVisible(lo.visible, id)
+	lo.renderLock.RUnlock()
+	if ok {
+		return item
+	}
+	return nil
+}
+
 // SetItemHeight supports changing the height of the specified list item. Items normally take the height of the template
 // returned from the CreateItem callback. The height parameter uses the same units as a fyne.Size type and refers
 // to the internal content height not including the divider size.
@@ -818,4 +833,3 @@ func (l *listLayout) nilOldVisibleSliceData(objs []listItemAndID, len, oldLen in
 		}
 	}
 }
-
