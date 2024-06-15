@@ -32,11 +32,12 @@ type List struct {
 	widget.BaseWidget
 	propertyLock sync.RWMutex
 
-	Length       func() int                                  `json:"-"`
-	CreateItem   func() fyne.CanvasObject                    `json:"-"`
-	UpdateItem   func(id ListItemID, item fyne.CanvasObject) `json:"-"`
-	OnSelected   func(id ListItemID)                         `json:"-"`
-	OnUnselected func(id ListItemID)                         `json:"-"`
+	Length               func() int                                  `json:"-"`
+	CreateItem           func() fyne.CanvasObject                    `json:"-"`
+	UpdateItem           func(id ListItemID, item fyne.CanvasObject) `json:"-"`
+	OnSelected           func(id ListItemID)                         `json:"-"`
+	OnUnselected         func(id ListItemID)                         `json:"-"`
+	OnReorderSelectionTo func(id ListItemID)                         `json:"-"`
 
 	// HideSeparators hides the separators between list rows
 	//
@@ -409,7 +410,9 @@ func (l *listLayout) calculateDragSeparatorY(logicalY float32) float32 {
 		padding := theme.Padding()
 		paddedItemHeight := l.list.itemMin.Height + padding
 		beforeItem := math.Round(float64(logicalY) / float64(paddedItemHeight))
-		return float32(beforeItem)*paddedItemHeight + theme.Padding()/2 - theme.SeparatorThicknessSize()/2
+		y := float32(beforeItem)*paddedItemHeight + theme.Padding()/2 - theme.SeparatorThicknessSize()/2
+		l.dragInsertAt = ListItemID(beforeItem)
+		return y
 	}
 	// TODO: support item heights
 	return 0
@@ -478,26 +481,31 @@ func (l *listLayout) calculateVisibleRowHeights(itemHeight float32, length int) 
 	return
 }
 
-func (l *listLayout) logicalDragPosition(absoluteY float32) float32 {
+func (l *listLayout) onRowDragged(id ListItemID, e *fyne.DragEvent) {
+	if !l.dragging {
+		l.list.Select(id)
+		l.dragging = true
+	}
+	l.updateDragSeparator()
+	l.dragSeparator.Show()
+
 	listPos := fyne.CurrentApp().Driver().AbsolutePositionForObject(l.list)
 	// this may break if the list itself is positioned outside the window viewport?
 	// don't worry about it now
-	absoluteY -= listPos.Y - l.list.offsetY
-	return absoluteY
-}
+	yPos := e.AbsolutePosition.Y - listPos.Y
+	ldp := yPos + l.list.offsetY
 
-func (l *listLayout) onRowDragged(e *fyne.DragEvent) {
-	l.dragging = true
-	l.dragSeparator.Show()
-	ldp := l.logicalDragPosition(e.AbsolutePosition.Y)
 	sepY := l.calculateDragSeparatorY(ldp)
-	l.dragSeparator.Move(fyne.NewPos(0, sepY))
+	l.dragSeparator.Move(fyne.NewPos(0, sepY-l.list.offsetY))
 	fmt.Printf("Logical drag position: %0.2f, separator %0.2f\n", ldp, sepY)
 }
 
 func (l *listLayout) onDragEnd() {
 	l.dragging = false
 	l.dragSeparator.Hide()
+	if l.list.OnReorderSelectionTo != nil {
+		l.list.OnReorderSelectionTo(l.dragInsertAt)
+	}
 }
 
 // Declare conformity with WidgetRenderer interface.
@@ -549,6 +557,7 @@ var _ fyne.Draggable = (*listItem)(nil)
 type listItem struct {
 	widget.BaseWidget
 
+	id                ListItemID
 	onTapped          func()
 	background        *canvas.Rectangle
 	listLayout        *listLayout
@@ -615,7 +624,7 @@ func (li *listItem) Tapped(*fyne.PointEvent) {
 }
 
 func (li *listItem) Dragged(e *fyne.DragEvent) {
-	li.listLayout.onRowDragged(e)
+	li.listLayout.onRowDragged(li.id, e)
 }
 
 func (li *listItem) DragEnd() {
@@ -657,6 +666,7 @@ type listLayout struct {
 	visibleRowHeights []float32
 	renderLock        sync.RWMutex
 	dragging          bool
+	dragInsertAt      ListItemID
 }
 
 func newListLayout(list *List) fyne.Layout {
@@ -697,6 +707,7 @@ func (l *listLayout) offsetUpdated(pos fyne.Position) {
 }
 
 func (l *listLayout) setupListItem(li *listItem, id ListItemID, focus bool) {
+	li.id = id
 	previousIndicator := li.selected
 	li.selected = false
 	for _, s := range l.list.selected {
@@ -831,9 +842,14 @@ func (l *listLayout) updateList(newOnly bool) {
 	l.slicePool.Put(visiblePtr)
 }
 
-func (l *listLayout) updateSeparators() {
+func (l *listLayout) updateDragSeparator() {
+	l.dragSeparator.Resize(fyne.NewSize(l.list.Size().Width, theme.SeparatorThicknessSize()))
 	l.dragSeparator.FillColor = theme.ForegroundColor()
 	l.dragSeparator.Refresh()
+}
+
+func (l *listLayout) updateSeparators() {
+	l.updateDragSeparator()
 	if l.list.HideSeparators {
 		l.separators = nil
 		return
