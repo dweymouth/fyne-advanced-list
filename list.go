@@ -91,10 +91,11 @@ func (l *List) CreateRenderer() fyne.WidgetRenderer {
 		l.itemMin = f().MinSize()
 	}
 
-	layout := &fyne.Container{Layout: newListLayout(l)}
+	ll := newListLayout(l)
+	layout := &fyne.Container{Layout: ll}
 	l.scroller = container.NewVScroll(layout)
 	layout.Resize(layout.MinSize())
-	objects := []fyne.CanvasObject{l.scroller}
+	objects := []fyne.CanvasObject{l.scroller, &ll.(*listLayout).dragSeparator}
 	return newListRenderer(objects, l, l.scroller, layout)
 }
 
@@ -400,6 +401,20 @@ func (l *List) contentMinSize() fyne.Size {
 	return fyne.NewSize(l.itemMin.Width, height+separatorThickness*float32(items-1))
 }
 
+func (l *listLayout) calculateDragSeparatorY(logicalY float32) float32 {
+	if l.list.scroller.Size().Height <= 0 {
+		return 0
+	}
+	if len(l.list.itemHeights) == 0 {
+		padding := theme.Padding()
+		paddedItemHeight := l.list.itemMin.Height + padding
+		beforeItem := math.Round(float64(logicalY) / float64(paddedItemHeight))
+		return float32(beforeItem)*paddedItemHeight + theme.Padding()/2 - theme.SeparatorThicknessSize()/2
+	}
+	// TODO: support item heights
+	return 0
+}
+
 // fills l.visibleRowHeights and also returns offY and minRow
 func (l *listLayout) calculateVisibleRowHeights(itemHeight float32, length int) (offY float32, minRow int) {
 	rowOffset := float32(0)
@@ -463,6 +478,28 @@ func (l *listLayout) calculateVisibleRowHeights(itemHeight float32, length int) 
 	return
 }
 
+func (l *listLayout) logicalDragPosition(absoluteY float32) float32 {
+	listPos := fyne.CurrentApp().Driver().AbsolutePositionForObject(l.list)
+	// this may break if the list itself is positioned outside the window viewport?
+	// don't worry about it now
+	absoluteY -= listPos.Y - l.list.offsetY
+	return absoluteY
+}
+
+func (l *listLayout) onRowDragged(e *fyne.DragEvent) {
+	l.dragging = true
+	l.dragSeparator.Show()
+	ldp := l.logicalDragPosition(e.AbsolutePosition.Y)
+	sepY := l.calculateDragSeparatorY(ldp)
+	l.dragSeparator.Move(fyne.NewPos(0, sepY))
+	fmt.Printf("Logical drag position: %0.2f, separator %0.2f\n", ldp, sepY)
+}
+
+func (l *listLayout) onDragEnd() {
+	l.dragging = false
+	l.dragSeparator.Hide()
+}
+
 // Declare conformity with WidgetRenderer interface.
 var _ fyne.WidgetRenderer = (*listRenderer)(nil)
 
@@ -507,20 +544,23 @@ func (l *listRenderer) Objects() []fyne.CanvasObject {
 var _ fyne.Widget = (*listItem)(nil)
 var _ fyne.Tappable = (*listItem)(nil)
 var _ desktop.Hoverable = (*listItem)(nil)
+var _ fyne.Draggable = (*listItem)(nil)
 
 type listItem struct {
 	widget.BaseWidget
 
 	onTapped          func()
 	background        *canvas.Rectangle
+	listLayout        *listLayout
 	child             fyne.CanvasObject
 	hovered, selected bool
 }
 
-func newListItem(child fyne.CanvasObject, tapped func()) *listItem {
+func newListItem(child fyne.CanvasObject, listLayout *listLayout, tapped func()) *listItem {
 	li := &listItem{
-		child:    child,
-		onTapped: tapped,
+		listLayout: listLayout,
+		child:      child,
+		onTapped:   tapped,
 	}
 
 	li.ExtendBaseWidget(li)
@@ -548,6 +588,9 @@ func (li *listItem) MinSize() fyne.Size {
 
 // MouseIn is called when a desktop pointer enters the widget.
 func (li *listItem) MouseIn(*desktop.MouseEvent) {
+	if li.listLayout.dragging {
+		return
+	}
 	li.hovered = true
 	li.Refresh()
 }
@@ -569,6 +612,14 @@ func (li *listItem) Tapped(*fyne.PointEvent) {
 		li.Refresh()
 		li.onTapped()
 	}
+}
+
+func (li *listItem) Dragged(e *fyne.DragEvent) {
+	li.listLayout.onRowDragged(e)
+}
+
+func (li *listItem) DragEnd() {
+	li.listLayout.onDragEnd()
 }
 
 func (li *listItem) Refresh() {
@@ -595,15 +646,17 @@ type listItemAndID struct {
 }
 
 type listLayout struct {
-	list       *List
-	separators []fyne.CanvasObject
-	children   []fyne.CanvasObject
+	list          *List
+	separators    []fyne.CanvasObject
+	children      []fyne.CanvasObject
+	dragSeparator canvas.Rectangle
 
 	itemPool          sync.Pool
 	visible           []listItemAndID
 	slicePool         sync.Pool // *[]itemAndID
 	visibleRowHeights []float32
 	renderLock        sync.RWMutex
+	dragging          bool
 }
 
 func newListLayout(list *List) fyne.Layout {
@@ -612,6 +665,7 @@ func newListLayout(list *List) fyne.Layout {
 		s := make([]listItemAndID, 0)
 		return &s
 	}
+	l.dragSeparator.FillColor = theme.ForegroundColor()
 	list.offsetUpdated = l.offsetUpdated
 	return l
 }
@@ -628,7 +682,7 @@ func (l *listLayout) getItem() *listItem {
 	item := l.itemPool.Get()
 	if item == nil {
 		if f := l.list.CreateItem; f != nil {
-			item = newListItem(f(), nil)
+			item = newListItem(f(), l, nil)
 		}
 	}
 	return item.(*listItem)
@@ -778,6 +832,8 @@ func (l *listLayout) updateList(newOnly bool) {
 }
 
 func (l *listLayout) updateSeparators() {
+	l.dragSeparator.FillColor = theme.ForegroundColor()
+	l.dragSeparator.Refresh()
 	if l.list.HideSeparators {
 		l.separators = nil
 		return
