@@ -17,7 +17,7 @@ func main() {
 	w := a.NewWindow("win")
 
 	data := []string{}
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 1000; i++ {
 		data = append(data, fmt.Sprintf("Test list row %d", i))
 	}
 
