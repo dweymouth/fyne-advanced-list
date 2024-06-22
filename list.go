@@ -514,7 +514,7 @@ func (l *listLayout) onRowDragged(id ListItemID, e *fyne.DragEvent) {
 		}
 	}
 
-	listPos := fyne.CurrentApp().Driver().AbsolutePositionForObject(l.list)
+	listPos := fyne.CurrentApp().Driver().AbsolutePositionForObject(l.list.scroller)
 	// this may break if the list itself is positioned outside the window viewport?
 	// don't worry about it now
 	l.dragRelativeY = e.AbsolutePosition.Y - listPos.Y
@@ -540,7 +540,6 @@ func (l *listLayout) onRowDragged(id ListItemID, e *fyne.DragEvent) {
 	}
 
 	l.updateDragSeparator()
-	l.dragSeparator.Show()
 }
 
 func (l *listLayout) onDragEnd() {
@@ -918,16 +917,24 @@ func (l *listLayout) updateList(newOnly bool) {
 }
 
 func (l *listLayout) updateDragSeparator() {
+	listSize := l.list.Size()
 	thickness := theme.SeparatorThicknessSize() * dragSeparatorThicknessMultiplier
-	l.dragSeparator.Resize(fyne.NewSize(l.list.Size().Width, thickness))
-	sepY := l.calculateDragSeparatorY(thickness)
-	l.dragSeparator.Move(fyne.NewPos(0, sepY-l.list.offsetY))
+	l.dragSeparator.Resize(fyne.NewSize(listSize.Width, thickness))
+	sepY := l.calculateDragSeparatorY(thickness) - l.list.offsetY
+	if sepY > listSize.Height || sepY < -theme.Padding() /*make sure it can show above 1st item*/ {
+		l.dragSeparator.Hide()
+		return
+	}
+	l.dragSeparator.Move(fyne.NewPos(0, sepY))
 	l.dragSeparator.FillColor = theme.ForegroundColor()
+	l.dragSeparator.Hidden = false
 	l.dragSeparator.Refresh()
 }
 
 func (l *listLayout) updateSeparators() {
-	l.updateDragSeparator()
+	if l.draggingRow >= 0 {
+		l.updateDragSeparator()
+	}
 	if l.list.HideSeparators {
 		l.separators = nil
 		return
