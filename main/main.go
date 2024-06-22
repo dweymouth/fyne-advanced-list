@@ -30,7 +30,9 @@ func main() {
 	)
 	var selected fyneadvancedlist.ListItemID
 	l.OnSelected = func(id fyneadvancedlist.ListItemID) { selected = id }
-	l.OnReorderSelectionTo = func(insertAt fyneadvancedlist.ListItemID) {
+	l.EnableDragging = true
+	l.OnDragBegin = l.Select
+	l.OnDragEnd = func(_, insertAt fyneadvancedlist.ListItemID) {
 		newData := make([]string, 0, len(data))
 		newData = append(newData, data[:insertAt]...)
 		newData = append(newData, data[selected])

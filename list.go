@@ -32,17 +32,23 @@ type List struct {
 	widget.BaseWidget
 	propertyLock sync.RWMutex
 
-	Length               func() int                                  `json:"-"`
-	CreateItem           func() fyne.CanvasObject                    `json:"-"`
-	UpdateItem           func(id ListItemID, item fyne.CanvasObject) `json:"-"`
-	OnSelected           func(id ListItemID)                         `json:"-"`
-	OnUnselected         func(id ListItemID)                         `json:"-"`
-	OnReorderSelectionTo func(id ListItemID)                         `json:"-"`
+	Length       func() int                                  `json:"-"`
+	CreateItem   func() fyne.CanvasObject                    `json:"-"`
+	UpdateItem   func(id ListItemID, item fyne.CanvasObject) `json:"-"`
+	OnSelected   func(id ListItemID)                         `json:"-"`
+	OnUnselected func(id ListItemID)                         `json:"-"`
 
 	// HideSeparators hides the separators between list rows
 	//
 	// Since: 2.5
 	HideSeparators bool
+
+	// Enable drag-and-drop of rows within the list
+	//
+	// Not core Fyne APIs
+	EnableDragging bool
+	OnDragEnd      func(draggedFrom, draggedTo ListItemID) `json:"-"`
+	OnDragBegin    func(id ListItemID)                     `json:"-"`
 
 	currentFocus  ListItemID
 	focused       bool
@@ -498,9 +504,14 @@ const (
 )
 
 func (l *listLayout) onRowDragged(id ListItemID, e *fyne.DragEvent) {
-	if !l.dragging {
-		l.list.Select(id)
-		l.dragging = true
+	if !l.list.EnableDragging {
+		return
+	}
+	if l.draggingRow < 0 /*no drag in progress*/ {
+		l.draggingRow = id
+		if l.list.OnDragBegin != nil {
+			l.list.OnDragBegin(id)
+		}
 	}
 
 	listPos := fyne.CurrentApp().Driver().AbsolutePositionForObject(l.list)
@@ -533,11 +544,12 @@ func (l *listLayout) onRowDragged(id ListItemID, e *fyne.DragEvent) {
 }
 
 func (l *listLayout) onDragEnd() {
+	startRow := l.draggingRow
 	l.ensureStopDragAnim()
-	l.dragging = false
+	l.draggingRow = -1
 	l.dragSeparator.Hide()
-	if l.list.OnReorderSelectionTo != nil {
-		l.list.OnReorderSelectionTo(l.dragInsertAt)
+	if l.list.OnDragEnd != nil {
+		l.list.OnDragEnd(startRow, l.dragInsertAt)
 	}
 }
 
@@ -646,7 +658,7 @@ func (li *listItem) MinSize() fyne.Size {
 
 // MouseIn is called when a desktop pointer enters the widget.
 func (li *listItem) MouseIn(*desktop.MouseEvent) {
-	if li.listLayout.dragging {
+	if li.listLayout.draggingRow >= 0 {
 		return
 	}
 	li.hovered = true
@@ -718,15 +730,15 @@ type listLayout struct {
 	visibleRowHeights []float32
 	renderLock        sync.RWMutex
 
-	dragging        bool
-	dragRelativeY   float32 // 0 == top of list widget
+	draggingRow     ListItemID // -1 if no drag
+	dragRelativeY   float32    // 0 == top of list widget
 	dragInsertAt    ListItemID
 	dragScrollAnim  *fyne.Animation
 	scrollAnimSpeed float32
 }
 
 func newListLayout(list *List) fyne.Layout {
-	l := &listLayout{list: list}
+	l := &listLayout{list: list, draggingRow: -1}
 	l.slicePool.New = func() any {
 		s := make([]listItemAndID, 0)
 		return &s
@@ -761,7 +773,7 @@ func (l *listLayout) offsetUpdated(pos fyne.Position) {
 	}
 	l.renderLock.Lock()
 	l.list.offsetY = pos.Y
-	if l.dragging {
+	if l.draggingRow >= 0 {
 		l.updateDragSeparator()
 	}
 	l.renderLock.Unlock()
