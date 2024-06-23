@@ -420,10 +420,17 @@ func (l *listLayout) calculateDragSeparatorY(thickness float32) float32 {
 		relY = h
 	}
 
+	numItems := 0.0
+	if l.list.Length != nil {
+		numItems = float64(l.list.Length())
+	}
 	if len(l.list.itemHeights) == 0 {
 		padding := theme.Padding()
 		paddedItemHeight := l.list.itemMin.Height + padding
 		beforeItem := math.Round(float64(relY+l.list.offsetY) / float64(paddedItemHeight))
+		if beforeItem > numItems {
+			beforeItem = numItems
+		}
 		y := float32(beforeItem)*paddedItemHeight - padding/2 - thickness
 		l.dragInsertAt = ListItemID(beforeItem)
 		return y
@@ -507,11 +514,10 @@ func (l *listLayout) onRowDragged(id ListItemID, e *fyne.DragEvent) {
 	if !l.list.EnableDragging {
 		return
 	}
+	startedDrag := false
 	if l.draggingRow < 0 /*no drag in progress*/ {
 		l.draggingRow = id
-		if l.list.OnDragBegin != nil {
-			l.list.OnDragBegin(id)
-		}
+		startedDrag = true
 	}
 
 	listPos := fyne.CurrentApp().Driver().AbsolutePositionForObject(l.list.scroller)
@@ -540,6 +546,9 @@ func (l *listLayout) onRowDragged(id ListItemID, e *fyne.DragEvent) {
 	}
 
 	l.updateDragSeparator()
+	if startedDrag && l.list.OnDragBegin != nil {
+		l.list.OnDragBegin(l.draggingRow)
+	}
 }
 
 func (l *listLayout) onDragEnd() {
@@ -598,7 +607,10 @@ func (l *listRenderer) Refresh() {
 	}
 	l.Layout(l.list.Size())
 	l.scroller.Refresh()
-	l.layout.Layout.(*listLayout).updateList(false)
+	layout := l.layout.Layout.(*listLayout)
+	layout.dragSeparator.FillColor = theme.ForegroundColor()
+	layout.dragSeparator.Refresh()
+	layout.updateList(false)
 	canvas.Refresh(l.list)
 }
 
@@ -921,14 +933,15 @@ func (l *listLayout) updateDragSeparator() {
 	thickness := theme.SeparatorThicknessSize() * dragSeparatorThicknessMultiplier
 	l.dragSeparator.Resize(fyne.NewSize(listSize.Width, thickness))
 	sepY := l.calculateDragSeparatorY(thickness) - l.list.offsetY
-	if sepY > listSize.Height || sepY < -theme.Padding() /*make sure it can show above 1st item*/ {
+	padding := theme.Padding()
+	if sepY > listSize.Height+padding || sepY < -padding {
+		// use margin of [-padding, padding] make sure
+		// it can be shown above/below first and last items
 		l.dragSeparator.Hide()
 		return
 	}
 	l.dragSeparator.Move(fyne.NewPos(0, sepY))
-	l.dragSeparator.FillColor = theme.ForegroundColor()
-	l.dragSeparator.Hidden = false
-	l.dragSeparator.Refresh()
+	l.dragSeparator.Show()
 }
 
 func (l *listLayout) updateSeparators() {
