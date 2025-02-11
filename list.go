@@ -30,13 +30,27 @@ var _ fyne.Focusable = (*List)(nil)
 // Since: 1.4
 type List struct {
 	widget.BaseWidget
-	propertyLock sync.RWMutex
 
-	Length       func() int                                  `json:"-"`
-	CreateItem   func() fyne.CanvasObject                    `json:"-"`
-	UpdateItem   func(id ListItemID, item fyne.CanvasObject) `json:"-"`
-	OnSelected   func(id ListItemID)                         `json:"-"`
-	OnUnselected func(id ListItemID)                         `json:"-"`
+	// Length is a callback for returning the number of items in the list.
+	Length func() int `json:"-"`
+
+	// CreateItem is a callback invoked to create a new widget to render
+	// a row in the list.
+	CreateItem func() fyne.CanvasObject `json:"-"`
+
+	// UpdateItem is a callback invoked to update a list row widget
+	// to display a new row in the list. The UpdateItem callback should
+	// only update the given item, it should not invoke APIs that would
+	// change other properties of the list itself.
+	UpdateItem func(id ListItemID, item fyne.CanvasObject) `json:"-"`
+
+	// OnSelected is a callback to be notified when a given item
+	// in the list has been selected.
+	OnSelected func(id ListItemID) `json:"-"`
+
+	// OnSelected is a callback to be notified when a given item
+	// in the list has been unselected.
+	OnUnselected func(id ListItemID) `json:"-"`
 
 	// HideSeparators hides the separators between list rows
 	//
@@ -44,11 +58,16 @@ type List struct {
 	HideSeparators bool
 
 	// Enable drag-and-drop of rows within the list
-	//
-	// Not core Fyne APIs
 	EnableDragging bool
-	OnDragEnd      func(draggedFrom, draggedTo ListItemID) `json:"-"`
-	OnDragBegin    func(id ListItemID)                     `json:"-"`
+
+	// OnDragEnd is the callback that is invoked when a row is dragged and dropped.
+	// The `draggedTo` value is the ListItemID where the dragged row
+	// would be inserted, with a value of  0 meaning before the first item
+	// and a value of list.Length() meaning after the last item in the list.
+	OnDragEnd func(draggedFrom, draggedTo ListItemID) `json:"-"`
+
+	// OnDragBegin is the callback invoked when a row begins dragging.
+	OnDragBegin func(id ListItemID) `json:"-"`
 
 	currentFocus  ListItemID
 	focused       bool
@@ -95,7 +114,9 @@ func (l *List) CreateRenderer() fyne.WidgetRenderer {
 	l.ExtendBaseWidget(l)
 
 	if f := l.CreateItem; f != nil && l.itemMin.IsZero() {
-		l.itemMin = f().MinSize()
+		item := createItemAndApplyThemeScope(f, l)
+
+		l.itemMin = item.MinSize()
 	}
 
 	ll := newListLayout(l)
@@ -138,9 +159,7 @@ func (l *List) RefreshItem(id ListItemID) {
 	}
 	l.BaseWidget.Refresh()
 	lo := l.scroller.Content.(*fyne.Container).Layout.(*listLayout)
-	lo.renderLock.RLock() // ensures we are not changing visible info in render code during the search
 	item, ok := lo.searchVisible(lo.visible, id)
-	lo.renderLock.RUnlock()
 	if ok {
 		lo.setupListItem(item, id, l.focused && l.currentFocus == id)
 	}
@@ -152,9 +171,7 @@ func (l *List) RefreshItem(id ListItemID) {
 // Since: Not a core Fyne list API
 func (l *List) ItemForID(id ListItemID) fyne.CanvasObject {
 	lo := l.scroller.Content.(*fyne.Container).Layout.(*listLayout)
-	lo.renderLock.RLock() // ensures we are not changing visible info in render code during the search
 	item, ok := lo.searchVisible(lo.visible, id)
-	lo.renderLock.RUnlock()
 	if ok {
 		return item.child
 	}
@@ -167,15 +184,12 @@ func (l *List) ItemForID(id ListItemID) fyne.CanvasObject {
 //
 // Since: 2.3
 func (l *List) SetItemHeight(id ListItemID, height float32) {
-	l.propertyLock.Lock()
-
 	if l.itemHeights == nil {
 		l.itemHeights = make(map[ListItemID]float32)
 	}
 
 	refresh := l.itemHeights[id] != height
 	l.itemHeights[id] = height
-	l.propertyLock.Unlock()
 
 	if refresh {
 		l.RefreshItem(id)
@@ -187,20 +201,24 @@ func (l *List) scrollTo(id ListItemID) {
 		return
 	}
 
-	separatorThickness := theme.Padding()
+	separatorThickness := l.Theme().Size(theme.SizeNamePadding)
 	y := float32(0)
 	lastItemHeight := l.itemMin.Height
-	if l.itemHeights == nil || len(l.itemHeights) == 0 {
+	if len(l.itemHeights) == 0 {
 		y = (float32(id) * l.itemMin.Height) + (float32(id) * separatorThickness)
 	} else {
-		for i := 0; i < id; i++ {
+		i := 0
+		for ; i < id; i++ {
 			height := l.itemMin.Height
 			if h, ok := l.itemHeights[i]; ok {
 				height = h
 			}
 
 			y += height + separatorThickness
-			lastItemHeight = height
+		}
+		lastItemHeight = l.itemMin.Height
+		if h, ok := l.itemHeights[i]; ok {
+			lastItemHeight = h
 		}
 	}
 
@@ -268,23 +286,16 @@ func (l *List) ScrollTo(id ListItemID) {
 //
 // Since: 2.1
 func (l *List) ScrollToBottom() {
-	length := 0
-	if f := l.Length; f != nil {
-		length = f()
-	}
-	if length > 0 {
-		length--
-	}
-	l.scrollTo(length)
-	l.Refresh()
+	l.scroller.ScrollToBottom()
+	l.offsetUpdated(l.scroller.Offset)
 }
 
 // ScrollToTop scrolls to the start of the list
 //
 // Since: 2.1
 func (l *List) ScrollToTop() {
-	l.scrollTo(0)
-	l.Refresh()
+	l.scroller.ScrollToTop()
+	l.offsetUpdated(l.scroller.Offset)
 }
 
 // ScrollToOffset scrolls the list to the given offset position.
@@ -304,9 +315,8 @@ func (l *List) ScrollToOffset(offset float32) {
 	if offset > contentHeight {
 		offset = contentHeight
 	}
-	l.scroller.Offset.Y = offset
+	l.scroller.ScrollToOffset(fyne.NewPos(0, offset))
 	l.offsetUpdated(l.scroller.Offset)
-	l.Refresh()
 }
 
 // GetScrollOffset returns the current scroll offset position
@@ -381,15 +391,13 @@ func (l *List) UnselectAll() {
 }
 
 func (l *List) contentMinSize() fyne.Size {
-	l.propertyLock.Lock()
-	defer l.propertyLock.Unlock()
+	separatorThickness := l.Theme().Size(theme.SizeNamePadding)
 	if l.Length == nil {
 		return fyne.NewSize(0, 0)
 	}
 	items := l.Length()
 
-	separatorThickness := theme.Padding()
-	if l.itemHeights == nil || len(l.itemHeights) == 0 {
+	if len(l.itemHeights) == 0 {
 		return fyne.NewSize(l.itemMin.Width,
 			(l.itemMin.Height+separatorThickness)*float32(items)-separatorThickness)
 	}
@@ -440,7 +448,7 @@ func (l *listLayout) calculateDragSeparatorY(thickness float32) float32 {
 }
 
 // fills l.visibleRowHeights and also returns offY and minRow
-func (l *listLayout) calculateVisibleRowHeights(itemHeight float32, length int) (offY float32, minRow int) {
+func (l *listLayout) calculateVisibleRowHeights(itemHeight float32, length int, th fyne.Theme) (offY float32, minRow int) {
 	rowOffset := float32(0)
 	isVisible := false
 	l.visibleRowHeights = l.visibleRowHeights[:0]
@@ -449,8 +457,7 @@ func (l *listLayout) calculateVisibleRowHeights(itemHeight float32, length int) 
 		return
 	}
 
-	// theme.Padding is a slow call, so we cache it
-	padding := theme.Padding()
+	padding := th.Size(theme.SizeNamePadding)
 
 	if len(l.list.itemHeights) == 0 {
 		paddedItemHeight := itemHeight + padding
@@ -521,7 +528,7 @@ func (l *listLayout) onRowDragged(id ListItemID, e *fyne.DragEvent) {
 	}
 
 	listPos := fyne.CurrentApp().Driver().AbsolutePositionForObject(l.list.scroller)
-	// this may break if the list itself is positioned outside the window viewport?
+	// TODO: this may break if the list itself is positioned outside the window viewport?
 	// don't worry about it now
 	l.dragRelativeY = e.AbsolutePosition.Y - listPos.Y
 
@@ -603,7 +610,8 @@ func (l *listRenderer) MinSize() fyne.Size {
 
 func (l *listRenderer) Refresh() {
 	if f := l.list.CreateItem; f != nil {
-		l.list.itemMin = f().MinSize()
+		item := createItemAndApplyThemeScope(f, l.list)
+		l.list.itemMin = item.MinSize()
 	}
 	l.Layout(l.list.Size())
 	l.scroller.Refresh()
@@ -611,14 +619,18 @@ func (l *listRenderer) Refresh() {
 	layout.dragSeparator.FillColor = theme.ForegroundColor()
 	layout.dragSeparator.Refresh()
 	layout.updateList(false)
+
+	for _, s := range layout.separators {
+		s.Refresh()
+	}
 	canvas.Refresh(l.list)
 }
-
-func (l *listRenderer) Destroy() {}
 
 func (l *listRenderer) Objects() []fyne.CanvasObject {
 	return l.objects
 }
+
+func (l *listRenderer) Destroy() {}
 
 // Declare conformity with interfaces.
 var _ fyne.Widget = (*listItem)(nil)
@@ -651,9 +663,11 @@ func newListItem(child fyne.CanvasObject, listLayout *listLayout, tapped func())
 // CreateRenderer is a private method to Fyne which links this widget to its renderer.
 func (li *listItem) CreateRenderer() fyne.WidgetRenderer {
 	li.ExtendBaseWidget(li)
+	th := li.Theme()
+	v := fyne.CurrentApp().Settings().ThemeVariant()
 
-	li.background = canvas.NewRectangle(theme.HoverColor())
-	li.background.CornerRadius = theme.SelectionRadiusSize()
+	li.background = canvas.NewRectangle(th.Color(theme.ColorNameHover, v))
+	li.background.CornerRadius = th.Size(theme.SizeNameSelectionRadius)
 	li.background.Hide()
 
 	return widget.NewSimpleRenderer(container.NewStack(
@@ -695,27 +709,30 @@ func (li *listItem) Tapped(*fyne.PointEvent) {
 	}
 }
 
-func (li *listItem) Dragged(e *fyne.DragEvent) {
-	li.listLayout.onRowDragged(li.id, e)
-}
-
-func (li *listItem) DragEnd() {
-	li.listLayout.onDragEnd()
-}
-
 func (li *listItem) Refresh() {
-	li.background.CornerRadius = theme.SelectionRadiusSize()
+	th := li.Theme()
+	v := fyne.CurrentApp().Settings().ThemeVariant()
+
+	li.background.CornerRadius = th.Size(theme.SizeNameSelectionRadius)
 	if li.selected {
-		li.background.FillColor = theme.SelectionColor()
+		li.background.FillColor = th.Color(theme.ColorNameSelection, v)
 		li.background.Show()
 	} else if li.hovered {
-		li.background.FillColor = theme.HoverColor()
+		li.background.FillColor = th.Color(theme.ColorNameHover, v)
 		li.background.Show()
 	} else {
 		li.background.Hide()
 	}
 	li.background.Refresh()
 	canvas.Refresh(li)
+}
+
+func (li *listItem) Dragged(e *fyne.DragEvent) {
+	li.listLayout.onRowDragged(li.id, e)
+}
+
+func (li *listItem) DragEnd() {
+	li.listLayout.onDragEnd()
 }
 
 // Declare conformity with Layout interface.
@@ -737,9 +754,8 @@ type listLayout struct {
 
 	itemPool          sync.Pool
 	visible           []listItemAndID
-	slicePool         sync.Pool // *[]itemAndID
+	wasVisible        []listItemAndID
 	visibleRowHeights []float32
-	renderLock        sync.RWMutex
 
 	draggingRow     ListItemID // -1 if no drag
 	dragRelativeY   float32    // 0 == top of list widget
@@ -750,12 +766,7 @@ type listLayout struct {
 
 func newListLayout(list *List) fyne.Layout {
 	l := &listLayout{list: list, draggingRow: -1}
-	l.slicePool.New = func() any {
-		s := make([]listItemAndID, 0)
-		return &s
-	}
 	l.dragSeparator.FillColor = theme.ForegroundColor()
-	l.dragSeparator.Hidden = true
 	list.offsetUpdated = l.offsetUpdated
 	return l
 }
@@ -772,7 +783,8 @@ func (l *listLayout) getItem() *listItem {
 	item := l.itemPool.Get()
 	if item == nil {
 		if f := l.list.CreateItem; f != nil {
-			item = newListItem(f(), l, nil)
+			item2 := createItemAndApplyThemeScope(f, l.list)
+			item = newListItem(item2, l, nil)
 		}
 	}
 	return item.(*listItem)
@@ -782,13 +794,10 @@ func (l *listLayout) offsetUpdated(pos fyne.Position) {
 	if l.list.offsetY == pos.Y {
 		return
 	}
-	l.renderLock.Lock()
 	l.list.offsetY = pos.Y
 	if l.draggingRow >= 0 {
 		l.updateDragSeparator()
 	}
-	l.renderLock.Unlock()
-	// updateList grabs the renderLock
 	l.updateList(true)
 }
 
@@ -827,8 +836,8 @@ func (l *listLayout) setupListItem(li *listItem, id ListItemID, focus bool) {
 }
 
 func (l *listLayout) updateList(newOnly bool) {
-	l.renderLock.Lock()
-	separatorThickness := theme.Padding()
+	th := l.list.Theme()
+	separatorThickness := th.Size(theme.SizeNamePadding)
 	width := l.list.Size().Width
 	length := 0
 	if f := l.list.Length; f != nil {
@@ -838,22 +847,16 @@ func (l *listLayout) updateList(newOnly bool) {
 		fyne.LogError("Missing UpdateCell callback required for List", nil)
 	}
 
-	// Keep pointer reference for copying slice header when returning to the pool
-	// https://blog.mike.norgate.xyz/unlocking-go-slice-performance-navigating-sync-pool-for-enhanced-efficiency-7cb63b0b453e
-	wasVisiblePtr := l.slicePool.Get().(*[]listItemAndID)
-	wasVisible := (*wasVisiblePtr)[:0]
-	wasVisible = append(wasVisible, l.visible...)
+	// l.wasVisible now represents the currently visible items, while
+	// l.visible will be updated to represent what is visible *after* the update
+	l.wasVisible = append(l.wasVisible, l.visible...)
+	l.visible = l.visible[:0]
 
-	l.list.propertyLock.Lock()
-	offY, minRow := l.calculateVisibleRowHeights(l.list.itemMin.Height, length)
-	l.list.propertyLock.Unlock()
+	offY, minRow := l.calculateVisibleRowHeights(l.list.itemMin.Height, length, th)
 	if len(l.visibleRowHeights) == 0 && length > 0 { // we can't show anything until we have some dimensions
-		l.renderLock.Unlock() // user code should not be locked
 		return
 	}
 
-	oldVisibleLen := len(l.visible)
-	l.visible = l.visible[:0]
 	oldChildrenLen := len(l.children)
 	l.children = l.children[:0]
 
@@ -862,7 +865,7 @@ func (l *listLayout) updateList(newOnly bool) {
 		row := index + minRow
 		size := fyne.NewSize(width, itemHeight)
 
-		c, ok := l.searchVisible(wasVisible, row)
+		c, ok := l.searchVisible(l.wasVisible, row)
 		if !ok {
 			c = l.getItem()
 			if c == nil {
@@ -879,9 +882,8 @@ func (l *listLayout) updateList(newOnly bool) {
 		l.children = append(l.children, c)
 	}
 	l.nilOldSliceData(l.children, len(l.children), oldChildrenLen)
-	l.nilOldVisibleSliceData(l.visible, len(l.visible), oldVisibleLen)
 
-	for _, wasVis := range wasVisible {
+	for _, wasVis := range l.wasVisible {
 		if _, ok := l.searchVisible(l.visible, wasVis.id); !ok {
 			l.itemPool.Put(wasVis.item)
 		}
@@ -896,36 +898,24 @@ func (l *listLayout) updateList(newOnly bool) {
 	c.Objects = append(c.Objects, l.separators...)
 	l.nilOldSliceData(c.Objects, len(c.Objects), oldObjLen)
 
-	// make a local deep copy of l.visible since rest of this function is unlocked
-	// and cannot safely access l.visible
-	visiblePtr := l.slicePool.Get().(*[]listItemAndID)
-	visible := (*visiblePtr)[:0]
-	visible = append(visible, l.visible...)
-	l.renderLock.Unlock() // user code should not be locked
-
 	if newOnly {
-		for _, vis := range visible {
-			if _, ok := l.searchVisible(wasVisible, vis.id); !ok {
+		for _, vis := range l.visible {
+			if _, ok := l.searchVisible(l.wasVisible, vis.id); !ok {
 				l.setupListItem(vis.item, vis.id, l.list.focused && l.list.currentFocus == vis.id)
 			}
 		}
 	} else {
-		for _, vis := range visible {
+		for _, vis := range l.visible {
 			l.setupListItem(vis.item, vis.id, l.list.focused && l.list.currentFocus == vis.id)
 		}
 	}
 
-	// nil out all references before returning slices to pool
-	for i := 0; i < len(wasVisible); i++ {
-		wasVisible[i].item = nil
+	// we don't need wasVisible now until next call to update
+	// nil out all references before truncating slice
+	for i := 0; i < len(l.wasVisible); i++ {
+		l.wasVisible[i].item = nil
 	}
-	for i := 0; i < len(visible); i++ {
-		visible[i].item = nil
-	}
-	*wasVisiblePtr = wasVisible // Copy the stack header over to the heap
-	*visiblePtr = visible
-	l.slicePool.Put(wasVisiblePtr)
-	l.slicePool.Put(visiblePtr)
+	l.wasVisible = l.wasVisible[:0]
 }
 
 func (l *listLayout) updateDragSeparator() {
@@ -957,15 +947,22 @@ func (l *listLayout) updateSeparators() {
 			l.separators = l.separators[:lenChildren]
 		} else {
 			for i := lenSep; i < lenChildren; i++ {
-				l.separators = append(l.separators, widget.NewSeparator())
+
+				sep := widget.NewSeparator()
+				//if cache.OverrideThemeMatchingScope(sep, l.list) {
+				sep.Refresh()
+				//}
+
+				l.separators = append(l.separators, sep)
 			}
 		}
 	} else {
 		l.separators = nil
 	}
 
-	separatorThickness := theme.SeparatorThicknessSize()
-	dividerOff := (theme.Padding() + separatorThickness) / 2
+	th := l.list.Theme()
+	separatorThickness := th.Size(theme.SizeNameSeparatorThickness)
+	dividerOff := (th.Size(theme.SizeNamePadding) + separatorThickness) / 2
 	for i, child := range l.children {
 		if i == 0 {
 			continue
@@ -995,11 +992,12 @@ func (l *listLayout) nilOldSliceData(objs []fyne.CanvasObject, len, oldLen int) 
 	}
 }
 
-func (l *listLayout) nilOldVisibleSliceData(objs []listItemAndID, len, oldLen int) {
-	if oldLen > len {
-		objs = objs[:oldLen] // gain view into old data
-		for i := len; i < oldLen; i++ {
-			objs[i].item = nil
-		}
-	}
+func createItemAndApplyThemeScope(f func() fyne.CanvasObject, _ fyne.Widget) fyne.CanvasObject {
+	item := f()
+	//if !cache.OverrideThemeMatchingScope(item, scope) {
+	//return item
+	//}
+
+	item.Refresh()
+	return item
 }
